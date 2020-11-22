@@ -6,20 +6,24 @@
 import GHC.Generics
 import Network.Http.Client
 import Control.Concurrent (threadDelay)
-import Control.Monad (join)
+import Control.Monad
 import Data.Aeson hiding (Options)
+import Data.Foldable
+import Data.Maybe
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.HashMap.Lazy as HML
 import Data.Text ()
 import OpenSSL
 import Options.Generic
+import System.ProgressBar
 
 addr = "logs.tf"
 
 data Options = Options {
   steamID64 :: Int
 , steamID3 :: Text
+, count :: Maybe Int
 } deriving (Generic, ParseRecord, Show)
 
 data MatchInfo = MatchInfo {
@@ -83,11 +87,21 @@ main = withOpenSSL $ do
   let ids = fmap Main.id $ logs $ logQuery 
   let binIDs = fmap toByteString ids
   let matchInfosM = fmap (matchInfo conn) binIDs
-  let logs10 = Prelude.take 30 matchInfosM
-  stats <- sequence logs10
+  
+  let logCount = fromMaybe 20 $ count opts
+  let logs10 = take logCount matchInfosM
+  
+  print $ "Fetching " <> show logCount <> " logs..."
+  progBar <- newProgressBar defStyle 10 $ Progress 0 logCount ()
+  stats <- forM logs10 (\log -> do
+    incProgress progBar 1
+    log) 
+
   let playerStats = join $ fmap players stats
   let onePlayerStats = filter ((steamID3 opts ==) . steamID) playerStats 
   let kills' = fmap kills onePlayerStats
-  print $ (show $ sum kills') <> " kills in 20 matches"
+  let avgKills = (realToFrac $ sum kills') / realToFrac logCount
+  print $ (show $ sum kills') <> " kills in " <> show logCount <> " matches (avg. " <>
+    show avgKills <> ")"
 
   closeConnection conn
