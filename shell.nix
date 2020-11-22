@@ -5,7 +5,7 @@ let
 
   nixPackages = [
     (haskellPackages.ghcWithPackages (pkgs: with pkgs; [
-      http-streams
+      http-streams optparse-generic
     ]))
   ];
 in
