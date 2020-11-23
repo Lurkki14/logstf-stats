@@ -1,7 +1,8 @@
 {-# LANGUAGE BlockArguments #-}
-{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE DeriveGeneric, DeriveAnyClass #-}
+{-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE OverloadedStrings #-}
 
 import GHC.Generics
 import Network.Http.Client
@@ -13,7 +14,7 @@ import Data.Maybe
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.HashMap.Lazy as HML
-import Data.Text ()
+import qualified Data.Text as T--(toUpper, toLower)
 import OpenSSL
 import Options.Generic
 import System.ProgressBar
@@ -33,9 +34,42 @@ data MatchInfo = MatchInfo {
 
 data PlayerStats = PlayerStats {
   steamID :: Text
+, classStats :: [ClassStats]
 , kills :: Int
 , deaths :: Int
 } deriving (Show)
+
+data TFClass = Scout | Soldier | Pyro | Demoman | Heavy | Engineer | Medic | Sniper | Spy
+  deriving (Read, Show)
+
+instance FromJSON TFClass where
+  -- capitalize first letter from the JSON string value 
+  parseJSON = withText "TFClass" $ \x ->
+    let s = (T.toUpper $ T.take 1 x) <> T.drop 1 x
+    in
+      return $ read $ T.unpack s
+
+data ClassStats = ClassStats {
+  _type :: TFClass -- keyword as JSON field :(
+, kills :: Int
+, deaths :: Int
+} deriving (Generic, Show)
+
+{-instance FromJSON ClassStats where
+  parseJSON = genericParseJSON defaultOptions {
+    fieldLabelModifier = drop 1 } -}
+
+instance FromJSON ClassStats where
+  parseJSON = genericParseJSON defaultOptions {
+    fieldLabelModifier = fieldLabel } where
+      fieldLabel "_type" = "type"
+      fieldLabel s = s
+
+{-data BaseClassStats = BaseClassStats {
+  kills :: Int
+, deaths :: Int
+} deriving (FromJSON, Generic, Show)
+-}
 
 data LogQuery = LogQuery {
   success :: Bool
@@ -51,7 +85,10 @@ data PlayerLog = PlayerLog {
 instance {-# OVERLAPPING #-} FromJSON [PlayerStats] where
   parseJSON x = parseJSON x >>= mapM parseEntry . HML.toList where
     parseEntry (t, v) = withObject "[PlayerStats]" (\o ->
-      PlayerStats t <$> o .: "kills" <*> o .: "deaths") v
+      PlayerStats t <$>
+        o .: "class_stats" <*>
+        o .: "kills" <*>
+        o .: "deaths") v
       --v is the JSON value containing the player objects with SteamID fields
 
 playerLogs :: Connection -> ByteString -> IO LogQuery
@@ -99,9 +136,10 @@ main = withOpenSSL $ do
 
   let playerStats = join $ fmap players stats
   let onePlayerStats = filter ((steamID3 opts ==) . steamID) playerStats 
-  let kills' = fmap kills onePlayerStats
+  let kills' = fmap (kills :: PlayerStats -> Int) onePlayerStats
   let avgKills = (realToFrac $ sum kills') / realToFrac logCount
   print $ (show $ sum kills') <> " kills in " <> show logCount <> " matches (avg. " <>
     show avgKills <> ")"
+  --print $ fmap classStats onePlayerStats
 
   closeConnection conn
