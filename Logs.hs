@@ -3,6 +3,7 @@
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 
 import GHC.Generics
 import Network.Http.Client
@@ -10,6 +11,7 @@ import Control.Concurrent (threadDelay)
 import Control.Monad
 import Data.Aeson hiding (Options)
 import Data.Foldable
+import Data.List
 import Data.Maybe
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as BS
@@ -18,6 +20,7 @@ import qualified Data.Text as T--(toUpper, toLower)
 import OpenSSL
 import Options.Generic
 import System.ProgressBar
+import Text.Read
 
 addr = "logs.tf"
 
@@ -40,31 +43,29 @@ data PlayerStats = PlayerStats {
 } deriving (Show)
 
 data TFClass = Scout | Soldier | Pyro | Demoman | Heavy | Engineer | Medic | Sniper | Spy
-  deriving (Read, Show)
+  deriving (Eq, Ord, Read, Show)
 
-instance FromJSON TFClass where
-  -- capitalize first letter from the JSON string value 
-  parseJSON = withText "TFClass" $ \x ->
-    let s = (T.toUpper $ T.take 1 x) <> T.drop 1 x
-    in
-      return $ read $ T.unpack s
+instance {-# OVERLAPPING #-} FromJSON (Maybe TFClass) where
+  parseJSON = withText "Maybe TFClass" $ \x -> do
+    let s = T.unpack $ (T.toUpper $ T.take 1 x) <> T.drop 1 x
+    result s where
+      result "Heavyweapons" = pure $ Just Heavy
+      result s = pure $ readMaybe s -- We might get the 10th class here...
 
 data ClassStats = ClassStats {
-  _type :: TFClass -- keyword as JSON field :(
+  _type :: Maybe TFClass -- keyword as JSON field :(
 , kills :: Int
 , deaths :: Int
 } deriving (Generic, Show)
 
-{-instance FromJSON ClassStats where
-  parseJSON = genericParseJSON defaultOptions {
-    fieldLabelModifier = drop 1 } -}
-
+-- Manual parser since aeson doesn't let me treat Maybe as mandatory...
 instance FromJSON ClassStats where
-  parseJSON = genericParseJSON defaultOptions {
-    fieldLabelModifier = fieldLabel } where
-      fieldLabel "_type" = "type"
-      fieldLabel s = s
-
+  parseJSON = withObject "ClassStats" $ \o -> do
+    ClassStats <$>
+      o .: "type" <*>
+      o .: "kills" <*>
+      o .: "deaths"
+  
 {-data BaseClassStats = BaseClassStats {
   kills :: Int
 , deaths :: Int
@@ -109,10 +110,38 @@ matchInfo conn id = do
       setAccept "application/json"
   threadDelay 100000 --Delay since logs.tf doesn't seem to like the frequent requests
   sendRequest conn req emptyBody
+  
+  {-let handleJSON = \r i -> do
+      print $ getStatusCode r
+      jsonHandler r i :: IO MatchInfo 
+  res <- try $ (receiveResponse conn jsonHandler :: IO MatchInfo)
+  case (res :: Either IOError MatchInfo) of
+    Left _ -> error "Couldn't parse JSON!"
+    Right v -> return v-}
+
   receiveResponse conn jsonHandler :: IO MatchInfo
 
 toByteString :: Show a => a -> ByteString
 toByteString x = BS.pack $ show x
+
+-- Separate function to show class specific stats
+-- Make sure the list only contains ClassStats whose class is the same
+showClassSummary :: [ClassStats] -> String
+showClassSummary stats =
+  (show $ Data.Foldable.length stats) <> " instances of " <> (show $ _type $ head stats) <>
+  " with " <> (show $ sum $ fmap (kills :: ClassStats -> Int) stats) <> " kills"
+
+showClassStats :: [ClassStats] -> String
+showClassStats stats =
+  let classSorted = sortBy (\x y -> compare (_type x) (_type y)) stats 
+      classSeparated = groupBy (\x y -> _type x == _type y) classSorted
+      classSummaries = unwords $ fmap ((<> "\n") . showClassSummary) classSeparated
+  in show classSummaries
+
+showStats :: [PlayerStats] -> String
+showStats playerStats =
+  let classStats' = join $ fmap classStats playerStats
+  in showClassStats classStats'
 
 main = withOpenSSL $ do
   opts <- getRecord "logstf-stats" :: IO Options
@@ -140,6 +169,6 @@ main = withOpenSSL $ do
   let avgKills = (realToFrac $ sum kills') / realToFrac logCount
   print $ (show $ sum kills') <> " kills in " <> show logCount <> " matches (avg. " <>
     show avgKills <> ")"
-  --print $ fmap classStats onePlayerStats
+  putStrLn $ showStats onePlayerStats
 
   closeConnection conn
