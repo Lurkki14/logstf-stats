@@ -10,6 +10,7 @@ import Network.Http.Client
 import Control.Concurrent (threadDelay)
 import Control.Monad
 import Data.Aeson hiding (Options)
+import Data.Bits
 import Data.Foldable
 import Data.List
 import Data.Maybe
@@ -26,7 +27,6 @@ addr = "logs.tf"
 
 data Options = Options {
   steamID64 :: Int
-, steamID3 :: Text
 , count :: Maybe Int
 } deriving (Generic, ParseRecord, Show)
 
@@ -124,6 +124,12 @@ matchInfo conn id = do
 toByteString :: Show a => a -> ByteString
 toByteString x = BS.pack $ show x
 
+-- https://developer.valvesoftware.com/wiki/SteamID
+steamID64toSteamID3 :: Int -> Text
+steamID64toSteamID3 x =
+  "[U:1:" <> (T.pack $ show $ highBits * 2) <> "]" where
+  highBits = (shiftR x 1) .&. 134217727 -- 0x7FFFFFF 
+
 -- Separate function to show class specific stats
 -- Make sure the list only contains ClassStats whose class is the same
 showClassSummary :: [ClassStats] -> String
@@ -164,7 +170,8 @@ main = withOpenSSL $ do
     log) 
 
   let playerStats = join $ fmap players stats
-  let onePlayerStats = filter ((steamID3 opts ==) . steamID) playerStats 
+  let steamID3' = steamID64toSteamID3 $ steamID64 opts
+  let onePlayerStats = filter ((steamID3' ==) . steamID) playerStats 
   let kills' = fmap (kills :: PlayerStats -> Int) onePlayerStats
   let avgKills = (realToFrac $ sum kills') / realToFrac logCount
   print $ (show $ sum kills') <> " kills in " <> show logCount <> " matches (avg. " <>
