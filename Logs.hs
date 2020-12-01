@@ -1,11 +1,15 @@
 {-# LANGUAGE BlockArguments #-}
+{-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric, DeriveAnyClass #-}
 {-# LANGUAGE DuplicateRecordFields #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TypeApplications #-}
 
 import GHC.Generics
+-- TODO: For getField, it's less shit than annotating record access, upgrade to RecordDotSyntax when it's available
+import GHC.Records
 import Network.Http.Client
 import Control.Concurrent (threadDelay)
 import Control.Monad
@@ -66,11 +70,33 @@ instance FromJSON ClassStats where
       o .: "kills" <*>
       o .: "deaths"
   
-{-data BaseClassStats = BaseClassStats {
+data BaseClassStats = BaseClassStats {
   kills :: Int
 , deaths :: Int
 } deriving (FromJSON, Generic, Show)
--}
+
+data MedicStats = MedicStats {
+  ubers :: Int
+, drops :: Int
+, healing :: Int
+}
+
+newtype ExplosiveClassStats = Airshots Int
+newtype SniperStats = Headshots Int
+newtype SpyStats = Backstabs Int
+
+data ClassSpecificStats =
+  MedicStats' MedicStats |
+  ExplosiveClassStats' ExplosiveClassStats |
+  SniperStats' SniperStats |
+  SpyStats' SpyStats
+
+-- The parsed JSON might contain bad data (eg. 10th class)
+{-data ParsedClassStats = ParsedClassStats {
+  _type :: Maybe TFClass
+, baseStats :: BaseClassStats
+, classSpecificStats :: Maybe ClassSpecificStats
+} -}
 
 data LogQuery = LogQuery {
   success :: Bool
@@ -135,7 +161,7 @@ steamID64toSteamID3 x =
 showClassSummary :: [ClassStats] -> String
 showClassSummary stats =
   (show $ Data.Foldable.length stats) <> " instances of " <> (show $ _type $ head stats) <>
-  " with " <> (show $ sum $ fmap (kills :: ClassStats -> Int) stats) <> " kills"
+  " with " <> (show $ sum $ fmap (getField @"kills") stats) <> " kills"
 
 showClassStats :: [ClassStats] -> String
 showClassStats stats =
@@ -172,7 +198,7 @@ main = withOpenSSL $ do
   let playerStats = join $ fmap players stats
   let steamID3' = steamID64toSteamID3 $ steamID64 opts
   let onePlayerStats = filter ((steamID3' ==) . steamID) playerStats 
-  let kills' = fmap (kills :: PlayerStats -> Int) onePlayerStats
+  let kills' = fmap (getField @"kills") onePlayerStats
   let avgKills = (realToFrac $ sum kills') / realToFrac logCount
   print $ (show $ sum kills') <> " kills in " <> show logCount <> " matches (avg. " <>
     show avgKills <> ")"
