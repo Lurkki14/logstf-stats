@@ -36,12 +36,12 @@ data Options = Options {
 
 data MatchInfo = MatchInfo {
   length :: Int
-, players :: [PlayerStats]
+, players :: [ParsedPlayerStats]
 } deriving (Show, Generic, FromJSON)
 
-data PlayerStats = PlayerStats {
+data ParsedPlayerStats = ParsedPlayerStats {
   steamID :: Text
-, classStats :: [ClassStats]
+, classStats :: [ParsedClassStats]
 , kills :: Int
 , deaths :: Int
 } deriving (Show)
@@ -56,21 +56,22 @@ instance {-# OVERLAPPING #-} FromJSON (Maybe TFClass) where
       result "Heavyweapons" = pure $ Just Heavy
       result s = pure $ readMaybe s -- We might get the 10th class here...
 
-data ClassStats = ClassStats {
+data ParsedClassStats = ParsedClassStats {
   _type :: Maybe TFClass -- keyword as JSON field :(
 , kills :: Int
 , deaths :: Int
 } deriving (Generic, Show)
 
 -- Manual parser since aeson doesn't let me treat Maybe as mandatory...
-instance FromJSON ClassStats where
+instance FromJSON ParsedClassStats where
   parseJSON = withObject "ClassStats" $ \o -> do
-    ClassStats <$>
+    ParsedClassStats <$>
       o .: "type" <*>
       o .: "kills" <*>
       o .: "deaths"
   
-data BaseClassStats = BaseClassStats {
+-- Shared per class stats and summed for all class stats
+data BaseStats = BaseStats {
   kills :: Int
 , deaths :: Int
 } deriving (FromJSON, Generic, Show)
@@ -92,11 +93,18 @@ data ClassSpecificStats =
   SpyStats' SpyStats
 
 -- The parsed JSON might contain bad data (eg. 10th class)
-{-data ParsedClassStats = ParsedClassStats {
-  _type :: Maybe TFClass
-, baseStats :: BaseClassStats
+data ClassStats = ClassStats {
+  _type :: TFClass
+, baseStats :: BaseStats
 , classSpecificStats :: Maybe ClassSpecificStats
-} -}
+}
+
+-- TODO: this is bad data too
+data PlayerStats' = PlayerStats' {
+  steamID :: Text
+, baseStats :: BaseStats
+, classStats :: [ParsedClassStats]
+}
 
 data LogQuery = LogQuery {
   success :: Bool
@@ -109,10 +117,11 @@ data PlayerLog = PlayerLog {
   id :: Int
 } deriving (Show, Generic, FromJSON)
 
-instance {-# OVERLAPPING #-} FromJSON [PlayerStats] where
+
+instance {-# OVERLAPPING #-} FromJSON [ParsedPlayerStats] where
   parseJSON x = parseJSON x >>= mapM parseEntry . HML.toList where
     parseEntry (t, v) = withObject "[PlayerStats]" (\o ->
-      PlayerStats t <$>
+      ParsedPlayerStats t <$>
         o .: "class_stats" <*>
         o .: "kills" <*>
         o .: "deaths") v
@@ -158,21 +167,21 @@ steamID64toSteamID3 x =
 
 -- Separate function to show class specific stats
 -- Make sure the list only contains ClassStats whose class is the same
-showClassSummary :: [ClassStats] -> String
+showClassSummary :: [ParsedClassStats] -> String
 showClassSummary stats =
-  (show $ Data.Foldable.length stats) <> " instances of " <> (show $ _type $ head stats) <>
+  (show $ Data.Foldable.length stats) <> " instances of " <> (show $ getField @"_type" $ head stats) <>
   " with " <> (show $ sum $ fmap (getField @"kills") stats) <> " kills"
 
-showClassStats :: [ClassStats] -> String
+showClassStats :: [ParsedClassStats] -> String
 showClassStats stats =
-  let classSorted = sortBy (\x y -> compare (_type x) (_type y)) stats 
-      classSeparated = groupBy (\x y -> _type x == _type y) classSorted
+  let classSorted = sortBy (\x y -> compare (getField @"_type" x) (getField @"_type" y)) stats 
+      classSeparated = groupBy (\x y -> getField @"_type" x == getField @"_type" y) classSorted
       classSummaries = unwords $ fmap ((<> "\n") . showClassSummary) classSeparated
   in show classSummaries
 
-showStats :: [PlayerStats] -> String
+showStats :: [ParsedPlayerStats] -> String
 showStats playerStats =
-  let classStats' = join $ fmap classStats playerStats
+  let classStats' = join $ fmap (getField @"classStats") playerStats
   in showClassStats classStats'
 
 main = withOpenSSL $ do
@@ -197,7 +206,7 @@ main = withOpenSSL $ do
 
   let playerStats = join $ fmap players stats
   let steamID3' = steamID64toSteamID3 $ steamID64 opts
-  let onePlayerStats = filter ((steamID3' ==) . steamID) playerStats 
+  let onePlayerStats = filter ((steamID3' ==) . getField @"steamID") playerStats 
   let kills' = fmap (getField @"kills") onePlayerStats
   let avgKills = (realToFrac $ sum kills') / realToFrac logCount
   print $ (show $ sum kills') <> " kills in " <> show logCount <> " matches (avg. " <>
