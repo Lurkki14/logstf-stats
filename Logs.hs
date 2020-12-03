@@ -2,6 +2,7 @@
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DeriveGeneric, DeriveAnyClass #-}
 {-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -99,11 +100,11 @@ data ClassStats = ClassStats {
 , classSpecificStats :: Maybe ClassSpecificStats
 }
 
--- TODO: this is bad data too
-data PlayerStats' = PlayerStats' {
+-- Represents single match
+data PlayerStats = PlayerStats {
   steamID :: Text
 , baseStats :: BaseStats
-, classStats :: [ParsedClassStats]
+, classStats :: [ClassStats]
 }
 
 data LogQuery = LogQuery {
@@ -126,6 +127,45 @@ instance {-# OVERLAPPING #-} FromJSON [ParsedPlayerStats] where
         o .: "kills" <*>
         o .: "deaths") v
       --v is the JSON value containing the player objects with SteamID fields
+
+parsedPlayerStatsToBaseStats :: ParsedPlayerStats -> BaseStats
+parsedPlayerStatsToBaseStats x =
+  BaseStats {
+    kills = getField @"kills" x
+  , deaths = getField @"deaths" x
+  }
+
+parsedClassStatsToBaseStats :: ParsedClassStats -> BaseStats
+parsedClassStatsToBaseStats x =
+  BaseStats {
+    kills = getField @"kills" x
+  , deaths = getField @"deaths" x
+  }
+
+-- Move class specific stats from ParsedPlayerStats to ClassStats
+toClassStats :: ParsedPlayerStats -> ParsedClassStats -> Maybe ClassStats
+toClassStats playerStats classStats
+  | any (clss ==) [Just Demoman, Just Soldier] = Nothing
+  | clss == Just Sniper = Nothing
+  | clss == Just Spy = Nothing
+  | clss == Just Medic = Nothing
+  | otherwise = clss >>= \c -> Just $ ClassStats {
+      _type = c
+    , baseStats = baseStats
+    , classSpecificStats = Nothing
+    }
+  where  
+    clss = getField @"_type" classStats
+    baseStats = parsedClassStatsToBaseStats classStats
+
+fromParsedPlayerStats :: ParsedPlayerStats -> PlayerStats
+fromParsedPlayerStats parsedStats =
+  PlayerStats {
+    steamID = getField @"steamID" parsedStats
+  , baseStats = parsedPlayerStatsToBaseStats parsedStats
+  , classStats = validClassStats
+  } where
+    validClassStats = catMaybes $ fmap (toClassStats parsedStats) (getField @"classStats" parsedStats)
 
 playerLogs :: Connection -> ByteString -> IO LogQuery
 playerLogs conn steamID = do
