@@ -25,12 +25,16 @@ import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as BS
 import qualified Data.HashMap.Lazy as HML
 import qualified Data.Text as T--(toUpper, toLower)
+import Numeric
 import OpenSSL
 import Options.Generic
 import System.ProgressBar
 import Text.Read
 
 addr = "logs.tf"
+
+newtype Second = Second Int
+newtype Minute = Minute Int
 
 data Options = Options {
   steamID64 :: Int
@@ -40,7 +44,7 @@ data Options = Options {
 data MatchInfo = MatchInfo {
   length :: Int
 , players :: [ParsedPlayerStats]
-} deriving (Show, Generic, FromJSON)
+} deriving (Generic, FromJSON)
 
 data ParsedPlayerStats = ParsedPlayerStats {
   steamID :: Text
@@ -48,10 +52,19 @@ data ParsedPlayerStats = ParsedPlayerStats {
 , kills :: Int
 , deaths :: Int
 , airshots :: Int
-} deriving (Show)
+{-, ubers :: Int
+, drops :: Int
+, healingDone :: Int -}
+} deriving ()
 
 data TFClass = Scout | Soldier | Pyro | Demoman | Heavy | Engineer | Medic | Sniper | Spy
   deriving (Eq, Ord, Read, Show)
+
+instance Show Second where
+  show (Second a) = (show a) <> "s"
+
+instance Show Minute where
+  show (Minute a) = (show a) <> "m"
 
 instance {-# OVERLAPPING #-} FromJSON (Maybe TFClass) where
   parseJSON = withText "Maybe TFClass" $ \x -> do
@@ -64,7 +77,8 @@ data ParsedClassStats = ParsedClassStats {
   _type :: Maybe TFClass -- keyword as JSON field :(
 , kills :: Int
 , deaths :: Int
-} deriving (Generic, Show)
+, playTime :: Second
+} deriving (Generic)
 
 -- Manual parser since aeson doesn't let me treat Maybe as mandatory...
 instance FromJSON ParsedClassStats where
@@ -72,18 +86,20 @@ instance FromJSON ParsedClassStats where
     ParsedClassStats <$>
       o .: "type" <*>
       o .: "kills" <*>
-      o .: "deaths"
+      o .: "deaths" <*>
+      (Second <$> o .: "total_time")
   
 -- Shared per class stats and summed for all class stats
 data BaseStats = BaseStats {
   kills :: Int
 , deaths :: Int
+, playTime :: Second
 } deriving (Show)
 
 data MedicStats = MedicStats {
   ubers :: Int
 , drops :: Int
-, healing :: Int
+, healingDone :: Int
 } deriving (Show)
 
 newtype ExplosiveClassStats = Airshots Int deriving (Show)
@@ -110,6 +126,22 @@ data PlayerStats = PlayerStats {
 , classStats :: [ClassStats]
 } deriving (Show)
 
+-- Stats normalized by time played
+data PlayerStatsPresentation = PlayerStatsPresentation {
+  playerStats :: PlayerStats
+, samplePeriod :: Minute
+}
+
+data BaseStatPresentation = BaseStatPresentation {
+  baseStats :: BaseStats
+, samplePeriod :: Minute
+}
+
+data StatPresentation a = StatPresentation {
+  stats :: a
+, samplePeriod :: Minute
+}
+
 data LogQuery = LogQuery {
   success :: Bool
 , results :: Int
@@ -132,6 +164,48 @@ instance Show BaseStats where
     "Deaths: " <> (show $ getField @"deaths" x)
 -}
 
+{-
+Scout (10 instances):
+  Kills: 600 (30 per 30m)
+-} 
+
+safeInit [] = []
+safeInit [_] = []
+safeInit (x:xs) = x : safeInit xs
+
+-- Produces a String eg. 'Kills: 90 (24.67 per 30m)
+showTimeNormalizedStat :: (Real a, Show a) => String -> a -> Second -> Minute -> String
+showTimeNormalizedStat statName x (Second playTime) (Minute period) =
+  statName <> ": " <> (show x) <> " (" <> (showFFloat (Just 2) ( perM * (realToFrac period) ) ) "" <>
+      " per " <> (show (Minute period) ) <> ")" where
+    perM = ( (/) (realToFrac x) (realToFrac playTime) ) * 60
+
+instance Show (StatPresentation BaseStats) where
+  show (StatPresentation stats period) =
+    "Playtime: " <> (showFFloat (Just 2) $ (realToFrac $ pts) / 60) "" <> "m\n" <>
+    showTimeNormalizedStat "Kills" (getField @"kills" stats) pt period <> "\n" <>
+    showTimeNormalizedStat "Deaths" (getField @"deaths" stats) pt period
+    where
+      pt = getField @"playTime" stats
+      (Second pts) = getField @"playTime" stats
+
+instance Show (StatPresentation ClassStats) where
+  show (StatPresentation stats period) =
+    show (getField @"_type" stats) <> ":\n" <>
+    -- init drops the last newline that show StatPresentation adds
+    (init $ indent $ show $ StatPresentation (getField @"baseStats" stats) period) <>
+    (showSpec $ getField @"classSpecificStats" stats)
+    where
+      showSpec Nothing = ""
+      showSpec (Just (ExplosiveClassStats' (Airshots a))) =
+        "\n\t" <> showTimeNormalizedStat "Airshots" a pt period
+      pt = getField @"playTime" $ getField @"baseStats" stats
+
+instance Show (StatPresentation PlayerStats) where
+  show (StatPresentation stats period) =
+    (show $ StatPresentation (getField @"baseStats" stats) period) <> "\n" <>
+    (unwords $ fmap (\s -> (show $ StatPresentation s period) <> "\n") (getField @"classStats" stats) ) 
+
 instance {-# OVERLAPPING #-} FromJSON [ParsedPlayerStats] where
   parseJSON x = parseJSON x >>= mapM parseEntry . HML.toList where
     parseEntry (t, v) = withObject "[PlayerStats]" (\o ->
@@ -139,7 +213,10 @@ instance {-# OVERLAPPING #-} FromJSON [ParsedPlayerStats] where
         o .: "class_stats" <*>
         o .: "kills" <*>
         o .: "deaths" <*>
-        o .: "as") v
+        o .: "as" {-<*>
+        o .: "ubers" <*>
+        o .: "drops" <*>
+        o .: "healing" -}) v
       --v is the JSON value containing the player objects with SteamID fields
 
 sumClassSpecificStats :: ClassSpecificStats -> ClassSpecificStats -> Maybe ClassSpecificStats
@@ -172,8 +249,8 @@ sumClassStatsLists xs ys =
       sumClassStats m n
 
 sumBaseStats :: BaseStats -> BaseStats -> BaseStats
-sumBaseStats (BaseStats a b) (BaseStats a' b') =
-  BaseStats (a + a') (b + b')
+sumBaseStats (BaseStats a b (Second c)) (BaseStats a' b' (Second c')) =
+  BaseStats (a + a') (b + b') (Second (c + c'))
 
 -- TODO: doesn't care about SteamID, so only use on lists that have the same one
 sumPlayerStats :: PlayerStats -> PlayerStats -> PlayerStats
@@ -189,13 +266,16 @@ parsedPlayerStatsToBaseStats x =
   BaseStats {
     kills = getField @"kills" x
   , deaths = getField @"deaths" x
-  }
+  , playTime = foldl1 (\(Second y) (Second z) -> Second (y + z)) playTimes
+  } where
+    playTimes = fmap (getField @"playTime") (getField @"classStats" x)
 
 parsedClassStatsToBaseStats :: ParsedClassStats -> BaseStats
 parsedClassStatsToBaseStats x =
   BaseStats {
     kills = getField @"kills" x
   , deaths = getField @"deaths" x
+  , playTime = getField @"playTime" x
   }
 
 -- Move class specific stats from ParsedPlayerStats to ClassStats
@@ -240,19 +320,9 @@ matchInfo conn id = do
   threadDelay 100000 --Delay since logs.tf doesn't seem to like the frequent requests
   sendRequest conn req emptyBody
   
-  let handleJSON = \r i -> do
-      print $ getStatusCode r
-      jsonHandler r i :: IO MatchInfo 
-  
-  res <- catch ((receiveResponse conn handleJSON :: IO MatchInfo) >>= pure . Just)
-    (\(_ :: SomeException) -> pure Nothing {-print "Caught parse err"-} {- (e :: SomeException) -} )
+  res <- catch ((receiveResponse conn jsonHandler :: IO MatchInfo) >>= pure . Just)
+    (\(_ :: SomeException) -> pure Nothing)
   pure res
-  {-res <- try $ (receiveResponse conn handleJSON {-jsonHandler-} :: IO MatchInfo)
-  case (res :: Either IOError MatchInfo) of
-    Left _ -> error "Couldn't parse JSON!"
-    Right v -> return v-}
-
-  --receiveResponse conn jsonHandler :: IO MatchInfo
 
 toByteString :: Show a => a -> ByteString
 toByteString x = BS.pack $ show x
@@ -317,15 +387,16 @@ main = withOpenSSL $ do
   let steamID3' = steamID64toSteamID3 $ steamID64 opts
   print steamID3'
   let onePlayerStats = filter ((steamID3' ==) . getField @"steamID") playerStats 
-  let kills' = fmap (getField @"kills") onePlayerStats
-  let avgKills = (realToFrac $ sum kills') / realToFrac logCount
-  print $ (show $ sum kills') <> " kills in " <> show logCount <> " matches (avg. " <>
-    show avgKills <> ")"
+  --let kills' = fmap (getField @"kills") onePlayerStats
+  --let avgKills = (realToFrac $ sum kills') / realToFrac logCount
+  --print $ (show $ sum kills') <> " kills in " <> show logCount <> " matches (avg. " <>
+    --show avgKills <> ")"
   --putStrLn $ showStats onePlayerStats
   --print $ showStats $ fmap fromParsedPlayerStats onePlayerStats
   --print $ getField @"baseStats" $ head $ fmap fromParsedPlayerStats onePlayerStats
   let pureStats = fmap fromParsedPlayerStats onePlayerStats
   --putStr $ show $ head $ fmap fromParsedPlayerStats onePlayerStats
-  putStr $ show $ foldl sumPlayerStats (head pureStats) (drop 1 pureStats)
+  putStr $ show $ foldl1 sumPlayerStats pureStats
+  putStr $ show $ StatPresentation (foldl1 sumPlayerStats pureStats) (Minute 30)
 
   closeConnection conn
