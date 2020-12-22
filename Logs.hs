@@ -52,10 +52,12 @@ data ParsedPlayerStats = ParsedPlayerStats {
 , kills :: Int
 , deaths :: Int
 , airshots :: Int
-{-, ubers :: Int
+, ubers :: Int
 , drops :: Int
-, healingDone :: Int -}
-} deriving ()
+, healingDone :: Int
+, damageDealt :: Int
+, damageTaken :: Int
+} deriving (Generic)
 
 data TFClass = Scout | Soldier | Pyro | Demoman | Heavy | Engineer | Medic | Sniper | Spy
   deriving (Eq, Ord, Read, Show)
@@ -95,6 +97,11 @@ data BaseStats = BaseStats {
 , deaths :: Int
 , playTime :: Second
 } deriving (Show)
+
+-- Things we only get per player, not per class 
+{-data OverallStats = OverallStats {
+  damage
+-}
 
 data MedicStats = MedicStats {
   ubers :: Int
@@ -193,12 +200,16 @@ instance Show (StatPresentation ClassStats) where
   show (StatPresentation stats period) =
     show (getField @"_type" stats) <> ":\n" <>
     -- init drops the last newline that show StatPresentation adds
-    (init $ indent $ show $ StatPresentation (getField @"baseStats" stats) period) <>
+    (safeInit $ indent $ show $ StatPresentation (getField @"baseStats" stats) period) <>
     (showSpec $ getField @"classSpecificStats" stats)
     where
       showSpec Nothing = ""
       showSpec (Just (ExplosiveClassStats' (Airshots a))) =
         "\n\t" <> showTimeNormalizedStat "Airshots" a pt period
+      showSpec (Just (MedicStats' ms)) =
+        "\n\t" <> (showTimeNormalizedStat "Ubers" (getField @"ubers" ms) pt period) <> "\n\t" <>
+        (showTimeNormalizedStat "Drops" (getField @"drops" ms) pt period) <> "\n\t" <>
+        (showTimeNormalizedStat "Healing done" (getField @"healingDone" ms) pt period) 
       pt = getField @"playTime" $ getField @"baseStats" stats
 
 instance Show (StatPresentation PlayerStats) where
@@ -213,15 +224,19 @@ instance {-# OVERLAPPING #-} FromJSON [ParsedPlayerStats] where
         o .: "class_stats" <*>
         o .: "kills" <*>
         o .: "deaths" <*>
-        o .: "as" {-<*>
+        o .: "as" <*>
         o .: "ubers" <*>
         o .: "drops" <*>
-        o .: "healing" -}) v
+        o .: "heal" <*>
+        o .: "dmg" <*>
+        o .: "dt") v
       --v is the JSON value containing the player objects with SteamID fields
 
 sumClassSpecificStats :: ClassSpecificStats -> ClassSpecificStats -> Maybe ClassSpecificStats
 sumClassSpecificStats (ExplosiveClassStats' (Airshots a)) (ExplosiveClassStats' (Airshots b)) =
   Just $ ExplosiveClassStats' $ Airshots $ a + b
+sumClassSpecificStats (MedicStats' (MedicStats a b c) ) (MedicStats' (MedicStats a' b' c') ) =
+  Just $ MedicStats' $ MedicStats (a + a') (b + b') (c + c')
 sumClassSpecificStats _ _ = Nothing
 
 sumClassStats :: ClassStats -> ClassStats -> Maybe ClassStats
@@ -291,6 +306,11 @@ toClassStats playerStats classStats
     -- NOTE: airshots aren't separated by class so this is inaccurate!
     specificStats Soldier = Just $ ExplosiveClassStats' $ Airshots $ getField @"airshots" playerStats
     specificStats Demoman = Just $ ExplosiveClassStats' $ Airshots $ getField @"airshots" playerStats
+    specificStats Medic = Just $ MedicStats' $ MedicStats {
+        ubers = getField @"ubers" playerStats
+      , drops = getField @"drops" playerStats
+      , healingDone = getField @"healingDone" playerStats
+    }
     specificStats _ = Nothing
 
 fromParsedPlayerStats :: ParsedPlayerStats -> PlayerStats
@@ -305,8 +325,8 @@ playerLogs :: Connection -> ByteString -> IO LogQuery
 playerLogs conn steamID = do
   let path = "/api/v1/log?player=" <> steamID
   let req = buildRequest1 $ (do
-      http GET path
-      setAccept "application/json")
+        http GET path
+        setAccept "application/json")
   
   sendRequest conn req emptyBody
   receiveResponse conn jsonHandler :: IO LogQuery
@@ -314,9 +334,9 @@ playerLogs conn steamID = do
 -- Get log (MatchInfo) by id
 matchInfo :: Connection -> ByteString -> IO (Maybe MatchInfo)
 matchInfo conn id = do
-  let req = buildRequest1 $ do
-      http GET $ "/json/" <> id
-      setAccept "application/json"
+  let req = buildRequest1 $ (do
+        http GET $ "/json/" <> id
+        setAccept "application/json")
   threadDelay 100000 --Delay since logs.tf doesn't seem to like the frequent requests
   sendRequest conn req emptyBody
   
