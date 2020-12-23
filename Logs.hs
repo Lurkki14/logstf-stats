@@ -57,6 +57,7 @@ data ParsedPlayerStats = ParsedPlayerStats {
 , healingDone :: Int
 , damageDealt :: Int
 , damageTaken :: Int
+, assists :: Int
 } deriving (Generic)
 
 data TFClass = Scout | Soldier | Pyro | Demoman | Heavy | Engineer | Medic | Sniper | Spy
@@ -80,6 +81,8 @@ data ParsedClassStats = ParsedClassStats {
 , kills :: Int
 , deaths :: Int
 , playTime :: Second
+, assists :: Int
+, damageDealt :: Int
 } deriving (Generic)
 
 -- Manual parser since aeson doesn't let me treat Maybe as mandatory...
@@ -89,13 +92,17 @@ instance FromJSON ParsedClassStats where
       o .: "type" <*>
       o .: "kills" <*>
       o .: "deaths" <*>
-      (Second <$> o .: "total_time")
+      (Second <$> o .: "total_time") <*>
+      o .: "assists" <*>
+      o .: "dmg"
   
 -- Shared per class stats and summed for all class stats
 data BaseStats = BaseStats {
   kills :: Int
 , deaths :: Int
 , playTime :: Second
+, damageDealt :: Int
+, assists :: Int
 } deriving (Show)
 
 -- Things we only get per player, not per class 
@@ -191,7 +198,9 @@ instance Show (StatPresentation BaseStats) where
   show (StatPresentation stats period) =
     "Playtime: " <> (showFFloat (Just 2) $ (realToFrac $ pts) / 60) "" <> "m\n" <>
     showTimeNormalizedStat "Kills" (getField @"kills" stats) pt period <> "\n" <>
-    showTimeNormalizedStat "Deaths" (getField @"deaths" stats) pt period
+    showTimeNormalizedStat "Deaths" (getField @"deaths" stats) pt period <> "\n" <>
+    showTimeNormalizedStat "Assists" (getField @"assists" stats) pt period <> "\n" <>
+    showTimeNormalizedStat "Damage dealt" (getField @"damageDealt" stats) pt period
     where
       pt = getField @"playTime" stats
       (Second pts) = getField @"playTime" stats
@@ -229,7 +238,8 @@ instance {-# OVERLAPPING #-} FromJSON [ParsedPlayerStats] where
         o .: "drops" <*>
         o .: "heal" <*>
         o .: "dmg" <*>
-        o .: "dt") v
+        o .: "dt" <*>
+        o .: "assists") v
       --v is the JSON value containing the player objects with SteamID fields
 
 sumClassSpecificStats :: ClassSpecificStats -> ClassSpecificStats -> Maybe ClassSpecificStats
@@ -264,8 +274,8 @@ sumClassStatsLists xs ys =
       sumClassStats m n
 
 sumBaseStats :: BaseStats -> BaseStats -> BaseStats
-sumBaseStats (BaseStats a b (Second c)) (BaseStats a' b' (Second c')) =
-  BaseStats (a + a') (b + b') (Second (c + c'))
+sumBaseStats (BaseStats a b (Second c) d e) (BaseStats a' b' (Second c') d' e') =
+  BaseStats (a + a') (b + b') (Second (c + c')) (d + d') (e + e')
 
 -- TODO: doesn't care about SteamID, so only use on lists that have the same one
 sumPlayerStats :: PlayerStats -> PlayerStats -> PlayerStats
@@ -282,6 +292,8 @@ parsedPlayerStatsToBaseStats x =
     kills = getField @"kills" x
   , deaths = getField @"deaths" x
   , playTime = foldl1 (\(Second y) (Second z) -> Second (y + z)) playTimes
+  , damageDealt = getField @"damageDealt" x
+  , assists = getField @"assists" x
   } where
     playTimes = fmap (getField @"playTime") (getField @"classStats" x)
 
@@ -291,6 +303,8 @@ parsedClassStatsToBaseStats x =
     kills = getField @"kills" x
   , deaths = getField @"deaths" x
   , playTime = getField @"playTime" x
+  , damageDealt = getField @"damageDealt" x
+  , assists = getField @"assists" x
   }
 
 -- Move class specific stats from ParsedPlayerStats to ClassStats
