@@ -39,7 +39,8 @@ newtype Minute = Minute Int
 data Options = Options {
   steamID64 :: Int
 , count :: Maybe Int
-} deriving (Generic, ParseRecord, Show)
+, playerCounts :: [Int]
+} deriving (Generic, Show)
 
 data MatchInfo = MatchInfo {
   length :: Int
@@ -62,6 +63,9 @@ data ParsedPlayerStats = ParsedPlayerStats {
 
 data TFClass = Scout | Soldier | Pyro | Demoman | Heavy | Engineer | Medic | Sniper | Spy
   deriving (Eq, Ord, Read, Show)
+
+instance ParseRecord Options where
+  parseRecord = parseRecordWithModifiers $ defaultModifiers { shortNameModifier = firstLetter }
 
 instance Show Second where
   show (Second a) = (show a) <> "s"
@@ -165,7 +169,12 @@ data LogQuery = LogQuery {
 
 data PlayerLog = PlayerLog {
   id :: Int
+, map :: String
+, date :: Int
+, players :: Int
 } deriving (Show, Generic, FromJSON)
+
+type PlayerCount = Int
 
 {-instance Show ClassStats where
   show x =
@@ -345,6 +354,12 @@ playerLogs conn steamID = do
   sendRequest conn req emptyBody
   receiveResponse conn jsonHandler :: IO LogQuery
 
+-- Filters logs that only have any of the specified player counts
+filteredPlayerLogs :: [PlayerLog] -> [PlayerCount] -> [PlayerLog]
+filteredPlayerLogs logs [] = logs
+filteredPlayerLogs logs counts =
+  mfilter (\log -> any (\x -> x == getField @"players" log) counts) logs
+
 -- Get log (MatchInfo) by id
 matchInfo :: Connection -> ByteString -> IO (Maybe MatchInfo)
 matchInfo conn id = do
@@ -357,6 +372,29 @@ matchInfo conn id = do
   res <- catch ((receiveResponse conn jsonHandler :: IO MatchInfo) >>= pure . Just)
     (\(_ :: SomeException) -> pure Nothing)
   pure res
+
+matchInfoFromOptions :: Connection -> Options -> IO [MatchInfo]
+matchInfoFromOptions conn opts = do
+    playerLogs' <- playerLogs conn (toByteString $ getField @"steamID64" opts)
+    let fetchableLogIDs = take (logCount playerLogs') $ logIDs $ filteredPlayerLogs (getField @"logs" playerLogs') (getField @"playerCounts" opts)
+    downloadLogs fetchableLogIDs playerLogs'
+    where
+      -- There might be less available logs than the desired amount
+      -- TODO: will only ever download the first 1000 logs
+      logCount query = min (fromMaybe 20 (getField @"count" opts)) (getField @"results" query)
+      downloadLogs :: [ByteString] -> LogQuery -> IO [MatchInfo]
+      downloadLogs logIDs query = (do
+        -- Description of what we want to fetch
+        let matchInfos = fmap (matchInfo conn) logIDs
+        print $ "Fetching " <> (show $ logCount query) <> " logs..."
+        progBar <- newProgressBar defStyle 10 $ Progress 0 (logCount query) ()
+        infos <- forM matchInfos (\log -> do
+          -- This is where the log is actually downloaded
+          incProgress progBar 1
+          log)
+        pure $ catMaybes infos)
+      logIDs :: [PlayerLog] -> [ByteString]
+      logIDs playerLogs = fmap (toByteString . getField @"id") playerLogs
 
 toByteString :: Show a => a -> ByteString
 toByteString x = BS.pack $ show x
@@ -403,21 +441,8 @@ main = withOpenSSL $ do
   ctx <- baselineContextSSL
   conn <- openConnectionSSL ctx addr 443
   
-  logQuery <- playerLogs conn $ toByteString $ steamID64 opts
-  let ids = fmap Main.id $ logs $ logQuery 
-  let binIDs = fmap toByteString ids
-  let matchInfosM = fmap (matchInfo conn) binIDs
-  
-  let logCount = fromMaybe 20 $ count opts
-  let logs10 = take logCount matchInfosM
-  
-  print $ "Fetching " <> show logCount <> " logs..."
-  progBar <- newProgressBar defStyle 10 $ Progress 0 logCount ()
-  stats <- forM logs10 (\log -> do
-    incProgress progBar 1
-    log) 
-
-  let playerStats = join $ fmap players $ catMaybes stats
+  matchInfos <- matchInfoFromOptions conn opts
+  let playerStats = join $ fmap (getField @"players") matchInfos
   let steamID3' = steamID64toSteamID3 $ steamID64 opts
   print steamID3'
   let onePlayerStats = filter ((steamID3' ==) . getField @"steamID") playerStats 
