@@ -373,6 +373,7 @@ matchInfo conn id = do
     (\(_ :: SomeException) -> pure Nothing)
   pure res
 
+-- TODO: compose with a function returning [IO MatchInfo] if we want to make this into a lib
 matchInfoFromOptions :: Connection -> Options -> IO [MatchInfo]
 matchInfoFromOptions conn opts = do
     playerLogs' <- playerLogs conn (toByteString $ getField @"steamID64" opts)
@@ -395,6 +396,15 @@ matchInfoFromOptions conn opts = do
         pure $ catMaybes infos)
       logIDs :: [PlayerLog] -> [ByteString]
       logIDs playerLogs = fmap (toByteString . getField @"id") playerLogs
+
+toPlayerStatPresentation :: [MatchInfo] -> Options -> StatPresentation PlayerStats
+toPlayerStatPresentation infos opts =
+  StatPresentation (sumStats $ processStats $ parsedOnePlayerStats playerStats) (Minute 30)  
+  where
+    playerStats = join $ fmap (getField @"players") infos
+    parsedOnePlayerStats pstats = mfilter (\x -> steamID64toSteamID3 (getField @"steamID64" opts) == getField @"steamID" x) pstats
+    processStats = fmap fromParsedPlayerStats
+    sumStats = foldl1 sumPlayerStats
 
 toByteString :: Show a => a -> ByteString
 toByteString x = BS.pack $ show x
@@ -442,20 +452,6 @@ main = withOpenSSL $ do
   conn <- openConnectionSSL ctx addr 443
   
   matchInfos <- matchInfoFromOptions conn opts
-  let playerStats = join $ fmap (getField @"players") matchInfos
-  let steamID3' = steamID64toSteamID3 $ steamID64 opts
-  print steamID3'
-  let onePlayerStats = filter ((steamID3' ==) . getField @"steamID") playerStats 
-  --let kills' = fmap (getField @"kills") onePlayerStats
-  --let avgKills = (realToFrac $ sum kills') / realToFrac logCount
-  --print $ (show $ sum kills') <> " kills in " <> show logCount <> " matches (avg. " <>
-    --show avgKills <> ")"
-  --putStrLn $ showStats onePlayerStats
-  --print $ showStats $ fmap fromParsedPlayerStats onePlayerStats
-  --print $ getField @"baseStats" $ head $ fmap fromParsedPlayerStats onePlayerStats
-  let pureStats = fmap fromParsedPlayerStats onePlayerStats
-  --putStr $ show $ head $ fmap fromParsedPlayerStats onePlayerStats
-  putStr $ show $ foldl1 sumPlayerStats pureStats
-  putStr $ show $ StatPresentation (foldl1 sumPlayerStats pureStats) (Minute 30)
+  putStr $ show $ toPlayerStatPresentation matchInfos opts
 
   closeConnection conn
