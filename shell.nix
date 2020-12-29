@@ -5,7 +5,7 @@ let
 
   nixPackages = [
     (haskellPackages.ghcWithPackages (pkgs: with pkgs; [
-      http-streams optparse-generic terminal-progress-bar
+      http-streams optparse-generic terminal-progress-bar haskell-language-server
     ]))
   ];
 in
