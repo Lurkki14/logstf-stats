@@ -3,8 +3,9 @@ name: logstf-stats
 version: 0.0.1
 build-type:          Simple
 
-executable lambdisk
+executable logstf-stats
   main-is:             Logs.hs
+  ghc-options:         -threaded
   build-depends:       base,
                        aeson,
 		       containers,
