@@ -344,15 +344,18 @@ fromParsedPlayerStats parsedStats =
   , classStats = catMaybes $ fmap (toClassStats parsedStats) (getField @"classStats" parsedStats)
   }
 
+
+
 playerLogs :: Connection -> ByteString -> IO LogQuery
-playerLogs conn steamID = do
+playerLogs conn steamID = withOpenSSL $ do
+  cn <- baselineContextSSL >>= \c -> openConnectionSSL c addr 443
   let path = "/api/v1/log?player=" <> steamID
   let req = buildRequest1 $ (do
         http GET path
         setAccept "application/json")
   
-  sendRequest conn req emptyBody
-  receiveResponse conn jsonHandler :: IO LogQuery
+  sendRequest cn req emptyBody
+  receiveResponse cn jsonHandler :: IO LogQuery
 
 -- Filters logs that only have any of the specified player counts
 filteredPlayerLogs :: [PlayerLog] -> [PlayerCount] -> [PlayerLog]
@@ -362,11 +365,11 @@ filteredPlayerLogs logs counts =
 
 -- Get log (MatchInfo) by id
 matchInfo :: Connection -> ByteString -> IO (Maybe MatchInfo)
-matchInfo conn id = do
+matchInfo conn id = withOpenSSL $ do
   let req = buildRequest1 $ (do
         http GET $ "/json/" <> id
         setAccept "application/json")
-  threadDelay 100000 --Delay since logs.tf doesn't seem to like the frequent requests
+  --threadDelay 100000 --Delay since logs.tf doesn't seem to like the frequent requests
   sendRequest conn req emptyBody
   
   res <- catch ((receiveResponse conn jsonHandler :: IO MatchInfo) >>= pure . Just)
@@ -375,7 +378,7 @@ matchInfo conn id = do
 
 -- TODO: compose with a function returning [IO MatchInfo] if we want to make this into a lib
 matchInfoFromOptions :: Connection -> Options -> IO [MatchInfo]
-matchInfoFromOptions conn opts = do
+matchInfoFromOptions conn opts = withOpenSSL $ do
     playerLogs' <- playerLogs conn (toByteString $ getField @"steamID64" opts)
     let fetchableLogIDs = take (logCount playerLogs') $ logIDs $ filteredPlayerLogs (getField @"logs" playerLogs') (getField @"playerCounts" opts)
     downloadLogs fetchableLogIDs playerLogs'
@@ -386,7 +389,7 @@ matchInfoFromOptions conn opts = do
       downloadLogs :: [ByteString] -> LogQuery -> IO [MatchInfo]
       downloadLogs logIDs query = (do
         -- Description of what we want to fetch
-        let matchInfos = fmap (matchInfo conn) logIDs
+        let matchInfos = fmap (dlHelper conn) logIDs -- Need helper that opens new connection
         print $ "Fetching " <> (show $ logCount query) <> " logs..."
         progBar <- newProgressBar defStyle 10 $ Progress 0 (logCount query) ()
         infos <- forM matchInfos (\log -> do
@@ -394,6 +397,14 @@ matchInfoFromOptions conn opts = do
           incProgress progBar 1
           log)
         pure $ catMaybes infos)
+      dlHelper :: Connection -> ByteString -> IO (Maybe MatchInfo)
+      dlHelper conn id = do
+        infoM <- matchInfo conn id
+        case infoM of
+          Just x -> pure $ Just x
+          Nothing -> do
+            --closeConnection conn -- For some reason closing here gives an error
+            baselineContextSSL >>= \ctx -> openConnectionSSL ctx addr 443 >>= \c -> dlHelper c id 
       logIDs :: [PlayerLog] -> [ByteString]
       logIDs playerLogs = fmap (toByteString . getField @"id") playerLogs
 
@@ -450,7 +461,7 @@ main = withOpenSSL $ do
 
   ctx <- baselineContextSSL
   conn <- openConnectionSSL ctx addr 443
-  
+
   matchInfos <- matchInfoFromOptions conn opts
   putStr $ show $ toPlayerStatPresentation matchInfos opts
 
